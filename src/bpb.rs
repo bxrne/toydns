@@ -36,7 +36,7 @@ impl BytePacketBuffer {
     }
 
     /// read a byte then move pos ahead
-    fn read(&mut self) -> Result<u8, String> {
+    pub fn read(&mut self) -> Result<u8, String> {
         if self.pos >= 512 {
             return Err("Buffer overflow".to_string());
         }
@@ -180,6 +180,19 @@ impl BytePacketBuffer {
         self.write(((val >> 16) & 0xFF) as u8)?; // Write the second byte
         self.write(((val >> 8) & 0xFF) as u8)?; // Write the third byte
         self.write((val & 0xFF) as u8)?; // Write the lowest byte
+        Ok(())
+    }
+
+    pub fn set(&mut self, pos: usize, val: u8) -> Result<(), String> {
+        if pos >= 512 {
+            return Err("Buffer overflow".to_string());
+        }
+        self.buf[pos] = val;
+        Ok(())
+    }
+    pub fn set_u16(&mut self, pos: usize, val: u16) -> Result<(), String> {
+        self.set(pos, (val >> 8) as u8)?; // Set the high byte
+        self.set(pos + 1, (val & 0xFF) as u8)?; // Set the low byte
         Ok(())
     }
 }

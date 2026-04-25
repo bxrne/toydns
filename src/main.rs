@@ -9,7 +9,7 @@ use dns::{DNSPacket, DNSQuestion, QueryType};
 
 fn main() -> Result<(), Box<dyn Error>> {
     // Perform an A query for google.com
-    let qname = "google.com";
+    let qname = "www.yahoo.com";
     let qtype = QueryType::A;
 
     // Using google's public DNS server
