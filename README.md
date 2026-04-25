@@ -2,7 +2,15 @@
 
 A tiny DNS resolver in Rust, following [dnsguide](https://github.com/EmilHernvall/dnsguide).
 
-## Capture packets
+## Run
+
+Sends a live DNS A query for `google.com` to Google's public resolver (`8.8.8.8:53`) and prints the parsed response:
+
+```sh
+cargo run
+```
+
+## Capture packets (optional)
 
 Capture a query:
 
@@ -15,10 +23,4 @@ Get the matching response:
 
 ```sh
 nc -u -w1 8.8.8.8 53 < query_packet.txt > response_packet.txt
-```
-
-## Run
-
-```sh
-cargo run
 ```

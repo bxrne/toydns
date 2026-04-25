@@ -1,6 +1,6 @@
 pub struct BytePacketBuffer {
     pub buf: [u8; 512], // DNS messages are typically limited to 512 bytes
-    pos: usize,         // Current position in the buffer
+    pub pos: usize,     // Current position in the buffer
 }
 
 impl BytePacketBuffer {
@@ -78,37 +78,108 @@ impl BytePacketBuffer {
 
     /// read qname (dns domain name)
     pub fn read_qname(&mut self, outstr: &mut String) -> Result<(), String> {
+        // Track our position locally; pointers must NOT mutate the buffer
+        // position past the original 2-byte pointer.
         let mut pos = self.position();
 
-        // Loop until we encounter a zero byte, which indicates the end of the domain name
+        let mut jumped = false;
+        let max_jumps = 5;
+        let mut jumps_performed = 0;
+
+        let mut delim = "";
         loop {
-            let len = self.get(pos)?; // Get the length of the next label
-            if len == 0 {
-                break; // End of domain name
+            if jumps_performed > max_jumps {
+                return Err(format!("Limit of {} jumps exceeded", max_jumps));
             }
+
+            let len = self.get(pos)?;
 
             // Check for pointer (compression)
             if (len & 0xC0) == 0xC0 {
-                let b2 = self.get(pos + 1)?; // Get the second byte of the pointer
-                let offset = (((len as u16) ^ 0xC0) << 8) | (b2 as u16); // Calculate the offset for the pointer
-                self.seek(offset as usize)?; // Move to the offset position
-                return self.read_qname(outstr); // Recursively read the domain name from the pointer location
-            } else {
-                pos += 1; // Move past the length byte
-                let label_bytes = self.get_range(pos, len as usize)?; // Get the label bytes
-                let label = std::str::from_utf8(label_bytes)
-                    .map_err(|_| "Invalid UTF-8 in label".to_string())?; // Convert bytes to string
-                outstr.push_str(label); // Append the label to the output string
-                outstr.push('.'); // Add a dot after each label
-                pos += len as usize; // Move to the next label
+                // On the first jump, advance the buffer position past the
+                // 2-byte pointer.
+                if !jumped {
+                    self.seek(pos + 2)?;
+                }
+
+                let b2 = self.get(pos + 1)? as u16;
+                let offset = (((len as u16) ^ 0xC0) << 8) | b2;
+                pos = offset as usize;
+
+                jumped = true;
+                jumps_performed += 1;
+                continue;
+            }
+
+            pos += 1;
+
+            if len == 0 {
+                break;
+            }
+
+            outstr.push_str(delim);
+
+            let label_bytes = self.get_range(pos, len as usize)?;
+            let label = std::str::from_utf8(label_bytes)
+                .map_err(|_| "Invalid UTF-8 in label".to_string())?;
+            outstr.push_str(&label.to_lowercase());
+
+            delim = ".";
+
+            pos += len as usize;
+        }
+
+        if !jumped {
+            self.seek(pos)?;
+        }
+
+        Ok(())
+    }
+
+    /// write a qname (dns domain name) to the buffer
+    pub fn write_qname(&mut self, qname: &str) -> Result<(), String> {
+        for label in qname.split('.') {
+            let len = label.len();
+            if len > 63 {
+                return Err("Label too long".to_string());
+            }
+            self.write(len as u8)?; // Write the length of the label
+            for b in label.as_bytes() {
+                self.write(*b)?; // Write the label bytes
             }
         }
+        self.write(0)?; // Write the null byte to indicate the end of the domain name
+        Ok(())
+    }
 
-        if !outstr.is_empty() {
-            outstr.pop(); // Remove the trailing dot if there is one
+    /// write a byte to the buffer and move pos ahead
+    fn write(&mut self, val: u8) -> Result<(), String> {
+        if self.pos >= 512 {
+            return Err("Buffer overflow".to_string());
         }
+        self.buf[self.pos] = val;
+        self.pos += 1;
+        Ok(())
+    }
 
-        self.seek(pos + 1)?; // Move past the null byte at the end of the domain name
+    /// write a u8 value to the buffer
+    pub fn write_u8(&mut self, val: u8) -> Result<(), String> {
+        self.write(val)
+    }
+
+    /// write a u16 value to the buffer
+    pub fn write_u16(&mut self, val: u16) -> Result<(), String> {
+        self.write((val >> 8) as u8)?; // Write the high byte
+        self.write((val & 0xFF) as u8)?; // Write the low byte
+        Ok(())
+    }
+
+    /// write a u32 value to the buffer
+    pub fn write_u32(&mut self, val: u32) -> Result<(), String> {
+        self.write((val >> 24) as u8)?; // Write the highest byte
+        self.write(((val >> 16) & 0xFF) as u8)?; // Write the second byte
+        self.write(((val >> 8) & 0xFF) as u8)?; // Write the third byte
+        self.write((val & 0xFF) as u8)?; // Write the lowest byte
         Ok(())
     }
 }
