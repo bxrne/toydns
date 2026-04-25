@@ -1,3 +1,4 @@
+use anyhow::Result;
 use std::net::Ipv4Addr;
 
 use crate::bpb::BytePacketBuffer;
@@ -6,7 +7,7 @@ use super::header::DNSHeader;
 use super::question::{DNSQuestion, QueryType};
 use super::record::DNSRecord;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct DNSPacket {
     pub header: DNSHeader,
     pub questions: Vec<DNSQuestion>,
@@ -16,44 +17,35 @@ pub struct DNSPacket {
 }
 
 impl DNSPacket {
-    pub fn new() -> DNSPacket {
-        DNSPacket {
-            header: DNSHeader::new(),
-            questions: Vec::new(),
-            answers: Vec::new(),
-            authorities: Vec::new(),
-            resources: Vec::new(),
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    pub fn from_buffer(buffer: &mut BytePacketBuffer) -> Result<DNSPacket, String> {
-        let mut result = DNSPacket::new();
-        result.header.read(buffer)?;
+    pub fn from_buffer(buffer: &mut BytePacketBuffer) -> Result<Self> {
+        let mut packet = Self::new();
+        packet.header.read(buffer)?;
 
-        for _ in 0..result.header.questions {
-            let mut question = DNSQuestion::new("".to_string(), QueryType::UNKNOWN(0));
-            question.read(buffer)?;
-            result.questions.push(question);
-        }
+        packet.questions = (0..packet.header.questions)
+            .map(|_| {
+                let mut question = DNSQuestion::new(String::new(), QueryType::UNKNOWN(0));
+                question.read(buffer)?;
+                Ok(question)
+            })
+            .collect::<Result<_>>()?;
 
-        for _ in 0..result.header.answers {
-            let rec = DNSRecord::read(buffer)?;
-            result.answers.push(rec);
-        }
-        for _ in 0..result.header.authoritative_entries {
-            let rec = DNSRecord::read(buffer)?;
-            result.authorities.push(rec);
-        }
-        for _ in 0..result.header.resource_entries {
-            let rec = DNSRecord::read(buffer)?;
-            result.resources.push(rec);
-        }
+        packet.answers = Self::read_records(buffer, packet.header.answers)?;
+        packet.authorities = Self::read_records(buffer, packet.header.authoritative_entries)?;
+        packet.resources = Self::read_records(buffer, packet.header.resource_entries)?;
 
-        Ok(result)
+        Ok(packet)
     }
 
-    /// Pick the first A record from the answers section, if any. Useful when
-    /// a name resolves to several IPs and any one of them will do.
+    fn read_records(buffer: &mut BytePacketBuffer, count: u16) -> Result<Vec<DNSRecord>> {
+        (0..count)
+            .map(|_| DNSRecord::read(buffer))
+            .collect::<Result<_>>()
+    }
+
     pub fn get_random_a(&self) -> Option<Ipv4Addr> {
         self.answers.iter().find_map(|record| match record {
             DNSRecord::A { addr, .. } => Some(*addr),
@@ -61,8 +53,6 @@ impl DNSPacket {
         })
     }
 
-    /// Iterate over `(domain, host)` pairs for every NS record in the
-    /// authorities section whose `domain` is a parent zone of `qname`.
     fn get_ns<'a>(&'a self, qname: &'a str) -> impl Iterator<Item = (&'a str, &'a str)> {
         self.authorities
             .iter()
@@ -73,43 +63,35 @@ impl DNSPacket {
             .filter(move |(domain, _)| qname.ends_with(*domain))
     }
 
-    /// Find an NS for `qname` that has a matching glue A record in the
-    /// additional/resources section and return its IP.
     pub fn get_resolved_ns(&self, qname: &str) -> Option<Ipv4Addr> {
-        self.get_ns(qname)
-            .flat_map(|(_, host)| {
-                self.resources.iter().filter_map(move |record| match record {
-                    DNSRecord::A { domain, addr, .. } if domain == host => Some(*addr),
-                    _ => None,
-                })
+        self.get_ns(qname).find_map(|(_, host)| {
+            self.resources.iter().find_map(|record| match record {
+                DNSRecord::A { domain, addr, .. } if domain == host => Some(*addr),
+                _ => None,
             })
-            .next()
+        })
     }
 
-    /// Return the hostname of the first NS for `qname`, regardless of whether
-    /// a glue record was provided. Used when we need to recursively resolve
-    /// the NS host ourselves.
     pub fn get_unresolved_ns<'a>(&'a self, qname: &'a str) -> Option<&'a str> {
         self.get_ns(qname).map(|(_, host)| host).next()
     }
 
-    pub fn write(&self, buf: &mut BytePacketBuffer) -> Result<(), String> {
+    pub fn write(&self, buf: &mut BytePacketBuffer) -> Result<()> {
         self.header.write(buf)?;
 
         for question in &self.questions {
             question.write(buf)?;
         }
 
-        for rec in &self.answers {
-            rec.write(buf)?;
-        }
-        for rec in &self.authorities {
-            rec.write(buf)?;
-        }
-        for rec in &self.resources {
-            rec.write(buf)?;
-        }
+        Self::write_records(buf, &self.answers)?;
+        Self::write_records(buf, &self.authorities)?;
+        Self::write_records(buf, &self.resources)
+    }
 
+    fn write_records(buf: &mut BytePacketBuffer, records: &[DNSRecord]) -> Result<()> {
+        for rec in records {
+            rec.write(buf)?;
+        }
         Ok(())
     }
 }
@@ -132,7 +114,7 @@ mod tests {
 
     #[test]
     fn write_then_from_buffer_roundtrip() {
-        let mut original = DNSPacket::new();
+        let mut original = DNSPacket::default();
         original.header.id = 0xBEEF;
         original.header.recursion_desired = true;
         original.header.response = true;
@@ -141,9 +123,9 @@ mod tests {
 
         original
             .questions
-            .push(DNSQuestion::new("example.com".to_string(), QueryType::A));
+            .push(DNSQuestion::new("example.com".to_owned(), QueryType::A));
         original.answers.push(DNSRecord::A {
-            domain: "example.com".to_string(),
+            domain: "example.com".to_owned(),
             addr: Ipv4Addr::new(93, 184, 216, 34),
             ttl: 3600,
         });
@@ -160,7 +142,7 @@ mod tests {
 
     #[test]
     fn get_random_a_returns_first_a_record() {
-        let mut p = DNSPacket::new();
+        let mut p = DNSPacket::default();
         p.answers.push(DNSRecord::CNAME {
             domain: "x".into(),
             host: "y".into(),
@@ -182,7 +164,7 @@ mod tests {
 
     #[test]
     fn get_resolved_ns_returns_glue_a_record_for_ns() {
-        let mut p = DNSPacket::new();
+        let mut p = DNSPacket::default();
         p.authorities.push(DNSRecord::NS {
             domain: "com".into(),
             host: "a.gtld-servers.net".into(),
@@ -201,7 +183,7 @@ mod tests {
 
     #[test]
     fn get_resolved_ns_none_without_matching_glue() {
-        let mut p = DNSPacket::new();
+        let mut p = DNSPacket::default();
         p.authorities.push(DNSRecord::NS {
             domain: "com".into(),
             host: "a.gtld-servers.net".into(),
@@ -212,7 +194,7 @@ mod tests {
 
     #[test]
     fn get_unresolved_ns_returns_first_ns_host() {
-        let mut p = DNSPacket::new();
+        let mut p = DNSPacket::default();
         p.authorities.push(DNSRecord::NS {
             domain: "com".into(),
             host: "a.gtld-servers.net".into(),
@@ -226,7 +208,6 @@ mod tests {
 
     #[test]
     fn get_ns_filters_by_zone_suffix() {
-        // An NS for "org" should not match a "example.com" qname.
         let mut p = DNSPacket::new();
         p.authorities.push(DNSRecord::NS {
             domain: "org".into(),

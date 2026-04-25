@@ -1,8 +1,10 @@
+use anyhow::{Result, bail};
+
 use crate::bpb::BytePacketBuffer;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct DNSHeader {
-    pub id: u16, // 16 bits
+    pub id: u16,
 
     pub z: bool,
     pub recursion_available: bool,
@@ -16,33 +18,13 @@ pub struct DNSHeader {
     pub opcode: u8,
     pub response: bool,
 
-    pub rescode: ResultCode, // 4 bits
+    pub rescode: ResultCode,
     pub checking_disabled: bool,
     pub authed_data: bool,
 }
 
 impl DNSHeader {
-    pub fn new() -> DNSHeader {
-        DNSHeader {
-            id: 0,
-            z: false,
-            recursion_available: false,
-            recursion_desired: false,
-            questions: 0,
-            answers: 0,
-            authoritative_entries: 0,
-            resource_entries: 0,
-            truncated_message: false,
-            authoritative_answer: false,
-            opcode: 0,
-            response: false,
-            rescode: ResultCode::NOERROR,
-            checking_disabled: false,
-            authed_data: false,
-        }
-    }
-
-    pub fn read(&mut self, buf: &mut BytePacketBuffer) -> Result<(), String> {
+    pub fn read(&mut self, buf: &mut BytePacketBuffer) -> Result<()> {
         self.id = buf.read_u16()?;
 
         let flags = buf.read_u16()?;
@@ -54,7 +36,7 @@ impl DNSHeader {
         self.opcode = (a >> 3) & 0x0F;
         self.response = (a & (1 << 7)) > 0;
 
-        self.rescode = ResultCode::from_num(b & 0x0F);
+        self.rescode = ResultCode::try_from(b & 0x0F)?;
         self.checking_disabled = (b & (1 << 4)) > 0;
         self.authed_data = (b & (1 << 5)) > 0;
         self.z = (b & (1 << 6)) > 0;
@@ -68,7 +50,7 @@ impl DNSHeader {
         Ok(())
     }
 
-    pub fn write(&self, buf: &mut BytePacketBuffer) -> Result<(), String> {
+    pub fn write(&self, buf: &mut BytePacketBuffer) -> Result<()> {
         buf.write_u16(self.id)?;
 
         let a: u8 = (self.recursion_desired as u8)
@@ -95,8 +77,10 @@ impl DNSHeader {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[allow(clippy::upper_case_acronyms)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
 pub enum ResultCode {
+    #[default]
     NOERROR = 0,
     FORMERR = 1,
     SERVFAIL = 2,
@@ -105,34 +89,25 @@ pub enum ResultCode {
     REFUSED = 5,
 }
 
-impl Default for DNSHeader {
-    fn default() -> Self {
-        Self::new()
+impl TryFrom<u8> for ResultCode {
+    type Error = anyhow::Error;
+
+    fn try_from(value: u8) -> Result<Self> {
+        Ok(match value {
+            0 => Self::NOERROR,
+            1 => Self::FORMERR,
+            2 => Self::SERVFAIL,
+            3 => Self::NXDOMAIN,
+            4 => Self::NOTIMP,
+            5 => Self::REFUSED,
+            _ => bail!("invalid result code: {value}"),
+        })
     }
 }
 
 impl ResultCode {
-    pub fn from_num(num: u8) -> ResultCode {
-        match num {
-            0 => ResultCode::NOERROR,
-            1 => ResultCode::FORMERR,
-            2 => ResultCode::SERVFAIL,
-            3 => ResultCode::NXDOMAIN,
-            4 => ResultCode::NOTIMP,
-            5 => ResultCode::REFUSED,
-            _ => panic!("Invalid result code"),
-        }
-    }
-
-    pub fn to_num(&self) -> u8 {
-        match *self {
-            ResultCode::NOERROR => 0,
-            ResultCode::FORMERR => 1,
-            ResultCode::SERVFAIL => 2,
-            ResultCode::NXDOMAIN => 3,
-            ResultCode::NOTIMP => 4,
-            ResultCode::REFUSED => 5,
-        }
+    pub fn to_num(self) -> u8 {
+        self as u8
     }
 }
 
@@ -144,19 +119,18 @@ mod tests {
     #[test]
     fn result_code_roundtrip_all_known() {
         for n in 0u8..=5 {
-            assert_eq!(ResultCode::from_num(n).to_num(), n);
+            assert_eq!(ResultCode::try_from(n).unwrap().to_num(), n);
         }
     }
 
     #[test]
-    #[should_panic]
-    fn result_code_invalid_panics() {
-        let _ = ResultCode::from_num(99);
+    fn result_code_invalid_errors() {
+        assert!(ResultCode::try_from(99).is_err());
     }
 
     #[test]
     fn new_header_has_sane_defaults() {
-        let h = DNSHeader::new();
+        let h = DNSHeader::default();
         assert_eq!(h.id, 0);
         assert_eq!(h.questions, 0);
         assert_eq!(h.rescode, ResultCode::NOERROR);
@@ -165,7 +139,7 @@ mod tests {
 
     #[test]
     fn write_then_read_roundtrip() {
-        let mut original = DNSHeader::new();
+        let mut original = DNSHeader::default();
         original.id = 6666;
         original.recursion_desired = true;
         original.recursion_available = true;
@@ -186,7 +160,7 @@ mod tests {
         original.write(&mut buf).unwrap();
         buf.seek(0).unwrap();
 
-        let mut read_back = DNSHeader::new();
+        let mut read_back = DNSHeader::default();
         read_back.read(&mut buf).unwrap();
 
         assert_eq!(read_back.id, original.id);
@@ -197,9 +171,15 @@ mod tests {
         assert_eq!(read_back.rescode, original.rescode);
         assert_eq!(read_back.questions, original.questions);
         assert_eq!(read_back.answers, original.answers);
-        assert_eq!(read_back.authoritative_entries, original.authoritative_entries);
+        assert_eq!(
+            read_back.authoritative_entries,
+            original.authoritative_entries
+        );
         assert_eq!(read_back.resource_entries, original.resource_entries);
-        assert_eq!(read_back.authoritative_answer, original.authoritative_answer);
+        assert_eq!(
+            read_back.authoritative_answer,
+            original.authoritative_answer
+        );
         assert_eq!(read_back.truncated_message, original.truncated_message);
         assert_eq!(read_back.checking_disabled, original.checking_disabled);
         assert_eq!(read_back.authed_data, original.authed_data);

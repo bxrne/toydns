@@ -8,13 +8,10 @@ mod bpb;
 mod dns;
 mod server;
 
-use std::error::Error;
-
 use server::DNSServer;
 
-fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> anyhow::Result<()> {
     let server = DNSServer::new("0.0.0.0:2053")?;
     println!("toydns listening on 0.0.0.0:2053");
-    server.run()?;
-    Ok(())
+    server.run()
 }

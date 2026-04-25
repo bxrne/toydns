@@ -1,109 +1,89 @@
 //! UDP DNS server with a built-in iterative recursive resolver.
-//!
-//! `handle_query` reads an incoming query, hands the question to
-//! [`recursive_lookup`] (which walks the DNS tree starting at a root
-//! nameserver), and writes the result back to the client.
 
+use anyhow::{Context, Result};
 use std::net::{Ipv4Addr, UdpSocket};
 
 use crate::bpb::BytePacketBuffer;
 use crate::dns::{DNSPacket, DNSQuestion, QueryType, ResultCode};
 
-/// `a.root-servers.net` — the bootstrap nameserver every recursive lookup
-/// starts from.
 const ROOT_NAMESERVER: Ipv4Addr = Ipv4Addr::new(198, 41, 0, 4);
 
-/// A UDP DNS server bound to a single address.
 pub struct DNSServer {
     socket: UdpSocket,
 }
 
 impl DNSServer {
-    /// Bind a new server to `addr` (e.g. `"0.0.0.0:2053"`).
-    pub fn new(addr: &str) -> Result<DNSServer, String> {
-        let socket = UdpSocket::bind(addr).map_err(|e| e.to_string())?;
-        Ok(DNSServer { socket })
+    pub fn new(addr: &str) -> Result<Self> {
+        let socket = UdpSocket::bind(addr).with_context(|| format!("failed to bind {addr}"))?;
+        Ok(Self { socket })
     }
 
-    /// Run the server forever, handling one query at a time. Errors from a
-    /// single query are logged and the loop continues.
-    pub fn run(&self) -> Result<(), String> {
+    pub fn run(&self) -> Result<()> {
         loop {
             if let Err(e) = self.handle_query() {
-                eprintln!("error: {}", e);
+                eprintln!("error: {e:#}");
             }
         }
     }
 
-    /// Read one query from the socket, resolve it via [`recursive_lookup`],
-    /// and write the response back to the client.
-    fn handle_query(&self) -> Result<(), String> {
+    fn handle_query(&self) -> Result<()> {
         let mut req_buffer = BytePacketBuffer::new();
         let (_, src) = self
             .socket
             .recv_from(&mut req_buffer.buf)
-            .map_err(|e| e.to_string())?;
+            .context("failed receiving udp query")?;
 
         let mut request = DNSPacket::from_buffer(&mut req_buffer)?;
-
-        // Skeleton response: same id, server-side flags set.
         let mut packet = DNSPacket::new();
         packet.header.id = request.header.id;
         packet.header.recursion_desired = true;
         packet.header.recursion_available = true;
         packet.header.response = true;
 
-        if let Some(question) = request.questions.pop() {
-            println!("Received query: {:?}", question);
-
-            match recursive_lookup(&question.qname, question.qtype) {
-                Ok(result) => {
-                    packet.questions.push(question);
-                    packet.header.rescode = result.header.rescode;
-
-                    for rec in result.answers {
-                        println!("Answer: {:?}", rec);
-                        packet.answers.push(rec);
-                    }
-                    for rec in result.authorities {
-                        println!("Authority: {:?}", rec);
-                        packet.authorities.push(rec);
-                    }
-                    for rec in result.resources {
-                        println!("Resource: {:?}", rec);
-                        packet.resources.push(rec);
-                    }
-                }
-                Err(_) => {
-                    packet.header.rescode = ResultCode::SERVFAIL;
-                }
-            }
-        } else {
-            // Malformed: a query with zero questions.
+        let Some(question) = request.questions.pop() else {
             packet.header.rescode = ResultCode::FORMERR;
+            return self.send_response(src, packet);
+        };
+
+        println!("Received query: {question:?}");
+
+        match recursive_lookup(&question.qname, question.qtype) {
+            Ok(result) => {
+                packet.questions.push(question);
+                packet.header.rescode = result.header.rescode;
+                log_and_append("Answer", result.answers, &mut packet.answers);
+                log_and_append("Authority", result.authorities, &mut packet.authorities);
+                log_and_append("Resource", result.resources, &mut packet.resources);
+            }
+            Err(_) => packet.header.rescode = ResultCode::SERVFAIL,
         }
 
+        self.send_response(src, packet)
+    }
+
+    fn send_response(&self, src: std::net::SocketAddr, packet: DNSPacket) -> Result<()> {
         let mut res_buffer = BytePacketBuffer::new();
         packet.write(&mut res_buffer)?;
-
-        let len = res_buffer.pos;
         self.socket
-            .send_to(&res_buffer.buf[0..len], src)
-            .map_err(|e| e.to_string())?;
-
+            .send_to(&res_buffer.buf[..res_buffer.pos], src)
+            .context("failed sending udp response")?;
         Ok(())
     }
 }
 
-/// Send a single non-recursive query for `(qname, qtype)` to `server` and
-/// return the parsed response.
-pub fn lookup(
-    qname: &str,
-    qtype: QueryType,
-    server: (Ipv4Addr, u16),
-) -> Result<DNSPacket, String> {
-    // Port 0 -> OS-assigned ephemeral port; avoids collisions across calls.
-    let socket = UdpSocket::bind(("0.0.0.0", 0)).map_err(|e| e.to_string())?;
+fn log_and_append(
+    label: &str,
+    records: Vec<crate::dns::DNSRecord>,
+    out: &mut Vec<crate::dns::DNSRecord>,
+) {
+    for rec in records {
+        println!("{label}: {rec:?}");
+        out.push(rec);
+    }
+}
+
+pub fn lookup(qname: &str, qtype: QueryType, server: (Ipv4Addr, u16)) -> Result<DNSPacket> {
+    let socket = UdpSocket::bind(("0.0.0.0", 0)).context("failed binding ephemeral udp socket")?;
 
     let mut packet = DNSPacket::new();
     packet.header.id = 6666;
@@ -111,67 +91,52 @@ pub fn lookup(
     packet.header.recursion_desired = true;
     packet
         .questions
-        .push(DNSQuestion::new(qname.to_string(), qtype));
+        .push(DNSQuestion::new(qname.to_owned(), qtype));
 
     let mut req_buffer = BytePacketBuffer::new();
     packet.write(&mut req_buffer)?;
     socket
-        .send_to(&req_buffer.buf[0..req_buffer.pos], server)
-        .map_err(|e| e.to_string())?;
+        .send_to(&req_buffer.buf[..req_buffer.pos], server)
+        .with_context(|| format!("failed sending query to {server:?}"))?;
 
     let mut res_buffer = BytePacketBuffer::new();
     socket
         .recv_from(&mut res_buffer.buf)
-        .map_err(|e| e.to_string())?;
+        .context("failed receiving upstream response")?;
 
     DNSPacket::from_buffer(&mut res_buffer)
 }
 
-/// Iteratively resolve `(qname, qtype)` starting from a root nameserver.
-///
-/// At each step we query the current `ns`. If we get answers, we are done.
-/// If we get `NXDOMAIN`, we propagate it. Otherwise we either follow a glue
-/// record from the additional section, or recursively resolve an NS host
-/// name and continue from its IP.
-pub fn recursive_lookup(qname: &str, qtype: QueryType) -> Result<DNSPacket, String> {
+pub fn recursive_lookup(qname: &str, qtype: QueryType) -> Result<DNSPacket> {
     let mut ns = ROOT_NAMESERVER;
 
     loop {
-        println!("attempting lookup of {:?} {} with ns {}", qtype, qname, ns);
-
+        println!("attempting lookup of {qtype:?} {qname} with ns {ns}");
         let response = lookup(qname, qtype, (ns, 53))?;
 
-        // Got answers and no error -> we're done.
         if !response.answers.is_empty() && response.header.rescode == ResultCode::NOERROR {
             return Ok(response);
         }
 
-        // Authoritative "no such name" -> propagate.
         if response.header.rescode == ResultCode::NXDOMAIN {
             return Ok(response);
         }
 
-        // Try to follow a glue record (NS + matching A in additional).
         if let Some(new_ns) = response.get_resolved_ns(qname) {
             ns = new_ns;
             continue;
         }
 
-        // No glue. Find an NS host name to resolve, or give up with the last
-        // response we got from the previous server.
-        let new_ns_name = match response.get_unresolved_ns(qname) {
-            Some(x) => x,
-            None => return Ok(response),
+        let Some(new_ns_name) = response.get_unresolved_ns(qname) else {
+            return Ok(response);
         };
 
-        // Recurse: resolve the NS host to an A record, then keep going.
         let recursive_response = recursive_lookup(new_ns_name, QueryType::A)?;
-
-        if let Some(new_ns) = recursive_response.get_random_a() {
-            ns = new_ns;
-        } else {
+        let Some(new_ns) = recursive_response.get_random_a() else {
             return Ok(response);
-        }
+        };
+
+        ns = new_ns;
     }
 }
 
@@ -204,7 +169,7 @@ mod tests {
         packet.header.id = 0x1234;
         let mut buf = BytePacketBuffer::new();
         packet.write(&mut buf).unwrap();
-        client.send_to(&buf.buf[0..buf.pos], server_addr).unwrap();
+        client.send_to(&buf.buf[..buf.pos], server_addr).unwrap();
 
         server.handle_query().expect("handle_query");
 
