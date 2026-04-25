@@ -2,8 +2,8 @@ use crate::bpb::BytePacketBuffer;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DNSQuestion {
-    qname: String,    // Domain name in DNS format
-    qtype: QueryType, // Type of the query (e.g., A, AAAA, CNAME)
+    pub qname: String,    // Domain name in DNS format
+    pub qtype: QueryType, // Type of the query (e.g., A, AAAA, CNAME)
 }
 
 impl DNSQuestion {
