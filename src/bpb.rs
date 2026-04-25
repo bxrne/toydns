@@ -27,7 +27,7 @@ impl BytePacketBuffer {
     }
 
     /// change the current position to a specified position.
-    fn seek(&mut self, pos: usize) -> Result<(), String> {
+    pub fn seek(&mut self, pos: usize) -> Result<(), String> {
         if pos > 512 {
             return Err("Buffer overflow".to_string());
         }
@@ -194,5 +194,103 @@ impl BytePacketBuffer {
         self.set(pos, (val >> 8) as u8)?; // Set the high byte
         self.set(pos + 1, (val & 0xFF) as u8)?; // Set the low byte
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_buffer_is_zeroed_and_at_pos_zero() {
+        let b = BytePacketBuffer::new();
+        assert_eq!(b.pos, 0);
+        assert!(b.buf.iter().all(|&x| x == 0));
+    }
+
+    #[test]
+    fn step_and_seek_advance_position() {
+        let mut b = BytePacketBuffer::new();
+        b.step(10).unwrap();
+        assert_eq!(b.position(), 10);
+        b.seek(3).unwrap();
+        assert_eq!(b.position(), 3);
+    }
+
+    #[test]
+    fn step_overflow_errors() {
+        let mut b = BytePacketBuffer::new();
+        assert!(b.step(513).is_err());
+    }
+
+    #[test]
+    fn seek_overflow_errors() {
+        let mut b = BytePacketBuffer::new();
+        assert!(b.seek(513).is_err());
+    }
+
+    #[test]
+    fn write_then_read_u8_u16_u32_roundtrip() {
+        let mut b = BytePacketBuffer::new();
+        b.write_u8(0xAB).unwrap();
+        b.write_u16(0x1234).unwrap();
+        b.write_u32(0xDEADBEEF).unwrap();
+        b.seek(0).unwrap();
+        assert_eq!(b.read().unwrap(), 0xAB);
+        assert_eq!(b.read_u16().unwrap(), 0x1234);
+        assert_eq!(b.read_u32().unwrap(), 0xDEADBEEF);
+    }
+
+    #[test]
+    fn read_at_end_errors() {
+        let mut b = BytePacketBuffer::new();
+        b.pos = 512;
+        assert!(b.read().is_err());
+    }
+
+    #[test]
+    fn set_and_set_u16_patch_bytes() {
+        let mut b = BytePacketBuffer::new();
+        b.step(4).unwrap();
+        b.set(0, 0x42).unwrap();
+        b.set_u16(1, 0xBEEF).unwrap();
+        assert_eq!(b.buf[0], 0x42);
+        assert_eq!(b.buf[1], 0xBE);
+        assert_eq!(b.buf[2], 0xEF);
+    }
+
+    #[test]
+    fn write_qname_then_read_qname_roundtrip() {
+        let mut b = BytePacketBuffer::new();
+        b.write_qname("www.example.com").unwrap();
+        b.seek(0).unwrap();
+        let mut out = String::new();
+        b.read_qname(&mut out).unwrap();
+        assert_eq!(out, "www.example.com");
+    }
+
+    #[test]
+    fn write_qname_rejects_long_label() {
+        let mut b = BytePacketBuffer::new();
+        let long = "a".repeat(64);
+        assert!(b.write_qname(&long).is_err());
+    }
+
+    #[test]
+    fn read_qname_follows_compression_pointer() {
+        // Lay out: at offset 0 -> "example.com\0", then at offset 13 a
+        // pointer (0xC0 0x00) pointing back to offset 0.
+        let mut b = BytePacketBuffer::new();
+        b.write_qname("example.com").unwrap();
+        let pointer_pos = b.pos;
+        b.write_u8(0xC0).unwrap();
+        b.write_u8(0x00).unwrap();
+        // Position the reader at the pointer.
+        b.seek(pointer_pos).unwrap();
+        let mut out = String::new();
+        b.read_qname(&mut out).unwrap();
+        assert_eq!(out, "example.com");
+        // Reader must have advanced past the 2-byte pointer, not jumped.
+        assert_eq!(b.pos, pointer_pos + 2);
     }
 }

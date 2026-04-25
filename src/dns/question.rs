@@ -60,3 +60,44 @@ impl QueryType {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bpb::BytePacketBuffer;
+
+    #[test]
+    fn query_type_roundtrip_known() {
+        for qt in [QueryType::A, QueryType::NS, QueryType::CNAME, QueryType::MX, QueryType::AAAA] {
+            assert_eq!(QueryType::from_num(qt.to_num()), qt);
+        }
+    }
+
+    #[test]
+    fn query_type_unknown_passes_value_through() {
+        let qt = QueryType::from_num(999);
+        assert_eq!(qt, QueryType::UNKNOWN(999));
+        assert_eq!(qt.to_num(), 999);
+    }
+
+    #[test]
+    fn write_then_read_roundtrip() {
+        let original = DNSQuestion::new("foo.example.com".to_string(), QueryType::AAAA);
+        let mut buf = BytePacketBuffer::new();
+        original.write(&mut buf).unwrap();
+        buf.seek(0).unwrap();
+
+        let mut read_back = DNSQuestion::new(String::new(), QueryType::UNKNOWN(0));
+        read_back.read(&mut buf).unwrap();
+        assert_eq!(read_back, original);
+    }
+
+    #[test]
+    fn write_consumes_qname_qtype_class() {
+        let q = DNSQuestion::new("a.b".to_string(), QueryType::A);
+        let mut buf = BytePacketBuffer::new();
+        q.write(&mut buf).unwrap();
+        // qname "a.b" = 1,'a',1,'b',0 = 5 bytes; plus 2 (qtype) + 2 (class) = 9
+        assert_eq!(buf.pos, 9);
+    }
+}

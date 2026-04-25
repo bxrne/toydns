@@ -70,3 +70,48 @@ impl DNSPacket {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::net::Ipv4Addr;
+
+    use super::*;
+
+    #[test]
+    fn new_packet_is_empty() {
+        let p = DNSPacket::new();
+        assert_eq!(p.header.id, 0);
+        assert!(p.questions.is_empty());
+        assert!(p.answers.is_empty());
+        assert!(p.authorities.is_empty());
+        assert!(p.resources.is_empty());
+    }
+
+    #[test]
+    fn write_then_from_buffer_roundtrip() {
+        let mut original = DNSPacket::new();
+        original.header.id = 0xBEEF;
+        original.header.recursion_desired = true;
+        original.header.response = true;
+        original.header.questions = 1;
+        original.header.answers = 1;
+
+        original
+            .questions
+            .push(DNSQuestion::new("example.com".to_string(), QueryType::A));
+        original.answers.push(DNSRecord::A {
+            domain: "example.com".to_string(),
+            addr: Ipv4Addr::new(93, 184, 216, 34),
+            ttl: 3600,
+        });
+
+        let mut buf = crate::bpb::BytePacketBuffer::new();
+        original.write(&mut buf).unwrap();
+        buf.seek(0).unwrap();
+
+        let parsed = DNSPacket::from_buffer(&mut buf).unwrap();
+        assert_eq!(parsed.header.id, original.header.id);
+        assert_eq!(parsed.questions, original.questions);
+        assert_eq!(parsed.answers, original.answers);
+    }
+}

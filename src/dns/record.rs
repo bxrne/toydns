@@ -168,3 +168,80 @@ fn write_rdata_with_qname(buf: &mut BytePacketBuffer, host: &str) -> Result<(), 
     buf.set_u16(len_pos, size as u16)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bpb::BytePacketBuffer;
+
+    fn roundtrip(rec: &DNSRecord) -> DNSRecord {
+        let mut buf = BytePacketBuffer::new();
+        rec.write(&mut buf).unwrap();
+        buf.seek(0).unwrap();
+        DNSRecord::read(&mut buf).unwrap()
+    }
+
+    #[test]
+    fn a_record_roundtrip() {
+        let rec = DNSRecord::A {
+            domain: "example.com".to_string(),
+            addr: Ipv4Addr::new(93, 184, 216, 34),
+            ttl: 3600,
+        };
+        assert_eq!(roundtrip(&rec), rec);
+    }
+
+    #[test]
+    fn aaaa_record_roundtrip() {
+        let rec = DNSRecord::AAAA {
+            domain: "example.com".to_string(),
+            addr: "2606:2800:220:1:248:1893:25c8:1946".parse().unwrap(),
+            ttl: 60,
+        };
+        assert_eq!(roundtrip(&rec), rec);
+    }
+
+    #[test]
+    fn ns_record_roundtrip() {
+        let rec = DNSRecord::NS {
+            domain: "example.com".to_string(),
+            host: "ns1.example.com".to_string(),
+            ttl: 1234,
+        };
+        assert_eq!(roundtrip(&rec), rec);
+    }
+
+    #[test]
+    fn cname_record_roundtrip() {
+        let rec = DNSRecord::CNAME {
+            domain: "www.example.com".to_string(),
+            host: "example.com".to_string(),
+            ttl: 7,
+        };
+        assert_eq!(roundtrip(&rec), rec);
+    }
+
+    #[test]
+    fn mx_record_roundtrip() {
+        let rec = DNSRecord::MX {
+            domain: "example.com".to_string(),
+            priority: 10,
+            host: "mail.example.com".to_string(),
+            ttl: 300,
+        };
+        assert_eq!(roundtrip(&rec), rec);
+    }
+
+    #[test]
+    fn write_returns_bytes_written() {
+        let rec = DNSRecord::A {
+            domain: "a.b".to_string(),
+            addr: Ipv4Addr::new(1, 2, 3, 4),
+            ttl: 1,
+        };
+        let mut buf = BytePacketBuffer::new();
+        let n = rec.write(&mut buf).unwrap();
+        assert_eq!(n, buf.pos);
+        assert!(n > 0);
+    }
+}
